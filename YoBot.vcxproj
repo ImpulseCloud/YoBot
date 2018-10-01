@@ -76,8 +76,8 @@
     <LibraryPath>L:\workspaces\VS2018\s2client-api\project\lib;$(SolutionDir)..\s2client-api\project\lib;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>L:\workspaces\VS2018\s2client-api\project\include;$(SolutionDir)..\s2client-api\project\include;$(IncludePath)</IncludePath>
-    <LibraryPath>L:\workspaces\VS2018\s2client-api\project\lib;$(SolutionDir)..\s2client-api\project\lib;$(LibraryPath)</LibraryPath>
+    <IncludePath>C:\Libraries\SC2AI\sc2api_precompiled\include;$(IncludePath)</IncludePath>
+    <LibraryPath>C:\Libraries\SC2AI\sc2api_precompiled\lib;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>

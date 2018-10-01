@@ -30,7 +30,7 @@ int main(int argc, char* argv[])
 	coordinator.LaunchStarcraft();
 	//auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\AcidPlantLE.SC2Map"; // "AcidPlant LE";  //"Interloper LE""16-Bit LE"
 	// auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\Redshift.SC2Map";
-	 auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\DarknessSanctuary.SC2Map";
+	 auto map = "F:\\StarCraft II\\Maps\\DarknessSanctuary.SC2Map";
 	//auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\16BitLE.SC2Map";
 	//auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\InterloperLE.SC2Map";
 	// auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\LostAndFoundLE.SC2Map";
