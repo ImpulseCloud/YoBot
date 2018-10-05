@@ -199,6 +199,20 @@ const Point3D & MapTopology::FindNearestBase(const Point3D& start) const {
 	return *targetb;
 }
 
+const Point3D & MapTopology::FindFarthestBase(const Point3D& start) const {
+	float distance = std::numeric_limits<float>::max();
+	const Point3D * targetb = &expansions[0];
+	for (const auto& u : expansions) {
+		float d = DistanceSquared2D(u, start);
+		float deltaz = abs(start.z - u.z);
+		if (d > distance && deltaz < 1.0f) {
+			distance = d;
+			targetb = &u;
+		}
+	}
+	return *targetb;
+}
+
 void MapTopology::debugMap(DebugInterface * debug) {
 	if (debug == nullptr) {
 		return;

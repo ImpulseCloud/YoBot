@@ -12,12 +12,22 @@
 #include <valarray>
 
 //#include "Strategys.h"
+
+//#include "WorkerManager.h"
+
 #define DllExport   __declspec( dllexport )  
 using namespace sc2;
 using namespace sc2util;
 
+#pragma warning( disable : 4267 4305 4244 )  
+
 class YoBot : public YoAgent {
 public:
+
+	int minerals = 0;
+	int gas = 0;
+	int supplyleft = 0;
+	sc2::Units probes;
 
 	virtual void OnGameStart() final {
 		std::cout << "YoStalkBot will kill you!" << std::endl;
@@ -34,15 +44,21 @@ public:
 		Actions()->UnitCommand(nexus, ABILITY_ID::RALLY_NEXUS, mineral_target);
 		Actions()->UnitCommand(nexus, ABILITY_ID::TRAIN_PROBE);
 
-		auto probes = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_PROBE));
-		bob = probes.front();
-		
-		TrySpreadProbes();
+		probes = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_PROBE));
+
+		//sort probes by distance to center of probes //ones on outside are best for taking as builder-bob or worker-scout
+		if (!probes.empty()) {
+			Point2D centerOfProbes = probes.front()->pos;
+			for (auto it = probes.begin()++; it != probes.end(); ++it) {
+				centerOfProbes += (*it)->pos;
+			}
+			centerOfProbes /= (float)probes.size();
+			std::sort(probes.begin(), probes.end(), [centerOfProbes](const sc2::Unit* a, const sc2::Unit* b) { return DistanceSquared2D(centerOfProbes, a->pos) < DistanceSquared2D(centerOfProbes, b->pos); });
+		}
+		bob = probes.back(); //builder-bob should be least-useful worker, most-likely from outer edge of worker-clump
+		workerStates.insert_or_assign(bob->tag, WorkerState::MovingToBuild);
 
 		const GameInfo& game_info = Observation()->GetGameInfo();
-		
-		
-
 
 		auto playerID = Observation()->GetPlayerID();
 		for (const auto & playerInfo : Observation()->GetGameInfo().player_info)
@@ -54,11 +70,11 @@ public:
 			}
 		}
 
-
-
 		if (game_info.enemy_start_locations.size() > 1) {
 			proxy = cog(game_info.enemy_start_locations);
 			scout = *(++Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_PROBE)).begin());
+			workerStates.insert_or_assign(scout->tag, WorkerState::MovingToScout);
+
 			// return minerals
 			Actions()->UnitCommand(scout, ABILITY_ID::SMART, nexus, true);
 			Actions()->UnitCommand(scout, ABILITY_ID::SMART, game_info.enemy_start_locations[0], true);
@@ -88,20 +104,101 @@ public:
 			}
 
 		}
-		//proxy = (.05 * target + .95*nexus->pos);
-		//proxy = FindFarthestBase(nexus->pos,target);
+		proxy = (.5 * target + .5*nexus->pos);
+		//proxy = this->map.FindFarthestBase(nexus->pos,target);
 		//proxy = game_info.start_locations[0];
-		proxy = this->map.FindNearestBase(nexus->pos); //Point3D(proxy.x, proxy.y, 11.0f));
+		//proxy = this->map.FindNearestBase(nexus->pos); //Point3D(proxy.x, proxy.y, 11.0f));
 
 		baseRazed = false;
 
-		//if (game_info.)
 		choke = (.2f * target + .8f*nexus->pos);
-
 
 		Actions()->UnitCommand(bob, ABILITY_ID::SMART, proxy);
 
+		TrySpreadProbes(nexus);
+		//babysitMineralWorkersEachFrame(probes);
+	}
 
+	void TrySpreadProbes(const sc2::Unit* townHall) {
+		auto th_pos = townHall->pos;
+
+		Units mins = Observation()->GetUnits(Unit::Alliance::Neutral, [th_pos](const Unit & u) { return  IsMineral(u.unit_type) && Distance2D(u.pos, th_pos) < 15.0f; });
+		Units probes = Observation()->GetUnits(Unit::Alliance::Self, [th_pos](const Unit & u) { return  u.unit_type == UNIT_TYPEID::PROTOSS_PROBE && Distance2D(u.pos, th_pos) < 15.0f; });
+
+		std::vector<int> targets = assignMineralWorkers(probes, mins, townHall);
+
+		for (int att = 0, e = targets.size(); att < e; att++) {
+			if (targets[att] != -1) {
+				Actions()->UnitCommand(probes[att], ABILITY_ID::SMART, mins[targets[att]]);
+			}
+		}
+	}
+
+	//depends on global variable "probes"
+	//allocate workers to the best mineral fields
+	std::vector<int> assignMineralWorkers(const Units & workers, const Units & mins, const Unit* townHall) {
+		//std::remove_if(mins.begin(), mins.end(), [npos](const Unit * u) { return  Distance2D(u->pos, npos) > 6.0f;  });
+
+		std::unordered_map<Tag, int> workerTagToIndexMap; //map workers' Unit.unit_tag to their index in the "workers" vector function-parameter
+		for (int i = 0, e = workers.size(); i < e; i++) {
+			workerTagToIndexMap.insert_or_assign(workers[i]->tag, i);
+		}
+
+		std::unordered_map<Tag, int> mineralTagToIndexMap; //map mineral-crystals' Unit.unit_tag to their index in the "mins" vector function-parameter
+		for (int i = 0, e = mins.size(); i < e; i++) {
+			mineralTagToIndexMap.insert_or_assign(mins[i]->tag, i);
+		}
+
+		//this will be returned where index is probe-index and value is mineralCrystal-index, of the passed-in Units lists
+		std::vector<int> workerToMineralTargetList;
+		workerToMineralTargetList.resize(workers.size(), -1);
+
+		std::vector<std::vector<int>> assignedWorkersOnMineral;
+		assignedWorkersOnMineral.resize(mins.size());
+
+		std::vector<int> freeAgents;
+		std::vector<int> freeMins;
+
+		//don't include builder or scout in freeAgents //they shouldn't be passed into here, but might at beginning of game
+		for (int i = 0, e = workers.size(); i < e; i++) {
+			if (bob != nullptr && bob->tag == workers[i]->tag)
+				continue;
+			if (scout != nullptr && scout->tag == workers[i]->tag)
+				continue;
+			//if (workerAssignedMinerals[workers[i]->tag] != nullptr) continue; don't reassign people?
+			freeAgents.push_back(i);
+		}
+
+		for (int i = 0, e = mins.size(); i < e; i++) {
+			freeMins.push_back(i);
+		}
+
+		//sort mineral-crystals by closeness-to-townHall-center in reverse-order, so we can use .back() and .pop_back()
+		if (!freeMins.empty() && townHall != nullptr) {	//const Unit* mineral_target = FindNearestMineralPatch(nexus->pos);
+			std::sort(freeMins.begin(), freeMins.end(), [townHall, mins](int a, int b) { return DistanceSquared2D(townHall->pos, mins[a]->pos) > DistanceSquared2D(townHall->pos, mins[b]->pos); });
+		}
+
+		//choose closest freeAgent to each mineral-crystal
+		while (!freeMins.empty() && !freeAgents.empty()) {
+			int chooser = freeMins.back(); //the mineral-crystal gets to choose its miners!
+			freeMins.pop_back();
+			auto target_pos = mins[chooser]->pos; //this should probably be the magicPosition, for higher chance of avoiding workers behind mineral-line from taking precedence
+			std::sort(freeAgents.begin(), freeAgents.end(), [target_pos, workers](int a, int b) { return DistanceSquared2D(target_pos, workers[a]->pos) > DistanceSquared2D(target_pos, workers[b]->pos); });
+
+			int assignee = freeAgents.back();
+			freeAgents.pop_back();
+
+			assignedWorkersOnMineral[chooser].push_back(assignee);
+
+			workerAssignedMinerals.insert_or_assign(workers[assignee]->tag, mins[chooser]->tag); //for each worker, which crystal are they assigned?
+
+			workerToMineralTargetList[assignee] = chooser;
+			if (assignedWorkersOnMineral[chooser].size() < 2) { //toAlloc(mins[chooser])) {
+				freeMins.insert(freeMins.begin(), chooser);
+			}
+		}
+
+		return workerToMineralTargetList;
 	}
 
 	virtual void OnUnitCreated(const Unit* unit) final {
@@ -130,6 +227,10 @@ public:
 		}
 		else if (unit->unit_type == UNIT_TYPEID::PROTOSS_GATEWAY) {
 			structures_in_progress.insert(structures_in_progress.begin(), unit); //check after completed to set Rally Point			
+		}
+		else if (unit->unit_type == UNIT_TYPEID::PROTOSS_PROBE) {
+			const sc2::Unit* closestTownHall = FindNearestTownHall(unit->pos);
+			//TrySpreadProbes(closestTownHall); //closestTH is an iterator, so have to derefence first
 		}
 	}
 
@@ -392,7 +493,7 @@ public:
 		if (unit == bob && unit->shield <= 5) {
 			// evasive action
 			evade(bob);
-		} else if (unit->unit_type == UNIT_TYPEID::PROTOSS_PROBE && unit->alliance == Unit::Alliance::Self) {
+		} else if (unit->unit_type == UNIT_TYPEID::PROTOSS_PROBE) {  //OnUnitAttacked only gives us our own units, so don't need  "&& unit->alliance == Unit::Alliance::Self"
 			auto list = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_PROBE));
 			int att = 0;
 			for (auto unit : list) {
@@ -432,6 +533,11 @@ public:
 						//Actions()->UnitCommand(nexus, ABILITY_ID::TRAIN_PROBE, true);
 					}
 					Actions()->UnitCommand(list, ABILITY_ID::ATTACK_ATTACK, reaper->pos);
+					//std::for_each(list.begin(), list.end(), [workerStates](auto worker) {workerStates.insert_or_assign(worker, WorkerState::Attacking);}); //for_each's lambda can't reference Globals!! blah!
+					for (auto worker: list)
+					{
+						workerStates.insert_or_assign(worker->tag, WorkerState::Attacking);
+					}
 				}
 			}
 			if (unit->shield == 0 && nexus != nullptr) {
@@ -476,7 +582,7 @@ public:
 	}
 
 	virtual void OnUnitEnterVision(const Unit* u) final {
-		if (target == proxy && u->alliance == Unit::Alliance::Enemy && u->health_max >= 200 && !u->is_flying) {
+		if (target == proxy && u->alliance == Unit::Alliance::Enemy && u->health_max >= 200 && !u->is_flying) { //health_max > 200 means a building, basically. not just a worker/Tier1scout
 			auto pottarget = map.FindNearestBase(u->pos);
 			if (Distance2D(pottarget, target) < 20) {
 				target = pottarget;
@@ -514,6 +620,7 @@ public:
 			for (auto probe : Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_PROBE))) {
 				if (probe->is_alive) {
 					bob = probe;
+					workerStates.insert_or_assign(bob->tag, WorkerState::MovingToBuild);
 					break;
 				}
 			}
@@ -528,7 +635,7 @@ public:
 					att++;
 				}
 			}
-			if (move || att >= (CountUnitType(UNIT_TYPEID::PROTOSS_ZEALOT) + CountUnitType(UNIT_TYPEID::PROTOSS_STALKER)) || nmy.size() >= 8 || CountUnitType(UNIT_TYPEID::PROTOSS_GATEWAY) <2) {
+			if (move || att >= (CountUnitType(UNIT_TYPEID::PROTOSS_ZEALOT) + CountUnitType(UNIT_TYPEID::PROTOSS_STALKER)) || nmy.size() >= 8 || CountUnitType(UNIT_TYPEID::PROTOSS_GATEWAY) < 2) {
 				proxy = map.getPosition(MapTopology::ally, MapTopology::main);
 			}
 		}
@@ -539,18 +646,18 @@ public:
 			auto list = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_PROBE));
 			list.erase(std::remove(list.begin(), list.end(), bob), list.end());
 			auto reaper = FindNearestEnemy(Observation()->GetStartLocation());
-			list.resize(3);
-			if (reaper != nullptr) {
+			list.resize(3); //take 3 attack-workers by default
+			if (reaper != nullptr) { //if it isn't a reaper
 				if (reaper->unit_type == UNIT_TYPEID::TERRAN_SCV) {
-					list.resize(2);
+					list.resize(2); //only take 2 for a harrassing-worker
 					//Actions()->UnitCommand(nexus, ABILITY_ID::TRAIN_PROBE, true);
 				}
 				Actions()->UnitCommand(list, ABILITY_ID::ATTACK_ATTACK, reaper->pos);
 			}
 		}
-		else if (unit->alliance == Unit::Alliance::Enemy && IsCommandStructure( unit->unit_type) ) {
+		else if (unit->alliance == Unit::Alliance::Enemy && IsCommandStructure(unit->unit_type)) {
 			if (Distance2D(target, unit->pos) < 20) {
-				baseRazed = true;
+				baseRazed = true; //cleanup now?
 			}
 		}
 	}
@@ -559,19 +666,19 @@ public:
 		float maxhp = std::numeric_limits<float>::max();
 		const Unit* targete = nullptr;
 		for (const auto& u : units) {
-			
+
 			float hp = u->health + u->shield;
 			if (hp < maxhp) {
 				maxhp = hp;
 				targete = u;
 			}
-			
+
 		}
 		return targete;
 	}
 
 	// default max is quite large, it amounts to roughly 15 game unit i.e. a  circle roughly the surface of a base
-	const Unit* FindNearestUnit(const Point2D& start, const Units & units, float maxRangeSquared=200.0f) {		
+	const Unit* FindNearestUnit(const Point2D& start, const Units & units, float maxRangeSquared = 200.0f) {
 		float distance = std::numeric_limits<float>::max();
 		const Unit* targete = nullptr;
 		for (const auto& u : units) {
@@ -590,21 +697,205 @@ public:
 	}
 
 	const Unit* FindNearestEnemy(const Point2D& start) {
-		return FindNearestUnit(start, Observation()->GetUnits(Unit::Alliance::Enemy));		
+		return FindNearestUnit(start, Observation()->GetUnits(Unit::Alliance::Enemy));
 	}
 
+	const sc2::Unit* FindNearestTownHall(sc2::Point3D point) {
+		const sc2::Units townHalls = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_NEXUS));
+		if (townHalls.size() == 0) return nullptr;
+
+		auto compareFunc = [point](const sc2::Unit* a, const sc2::Unit* b) { return Distance2D(a->pos, point) < Distance2D(b->pos, point);};
+		auto closestTownHall = std::min_element(townHalls.begin(), townHalls.end(), compareFunc);
+
+		return *closestTownHall; //this is an iterator, so have to dereference first
+	}
+
+	enum WorkerState {
+		MovingToMineral, //in-transit to mineral-crystal
+		GatheringMineral, //actively mining the crystal with ability
+		ReturningMineral, //returning cargo to the nearest TownHall
+		GatheringGas,  //getting that sweet Vespene
+		ReturningGas,  //returning gas to townHall
+		MovingToBuild, //moving to a location to build-structure
+		MovingToScout, //scouting around for info's
+		Attacking,     //fight on to Valhalla!
+		Busy, //doing something important and don't bother me with mineral-gathering commands!
+		Idle, //no idea what I should do now
+		numWorkerStates //number of current SCV states
+	};
 
 
+	std::unordered_map<sc2::Tag, sc2::Tag> workerAssignedMinerals; //for each worker, which crystal are they assigned?
+	std::unordered_map<sc2::Tag, sc2::Point2D> magicSpots; //for each crystal, where is the magic spot?
+	std::unordered_map<sc2::Tag, WorkerState> workerStates; //what each worker is doing ('task', not 'job')
 
-	
-	int minerals = 0;
-	int gas = 0;
-	int supplyleft = 0;
-	sc2::Units probes;
+	sc2::Point2D calcMagicSpot(const sc2::Unit* mineral) {
+		const sc2::Unit* closestTH = FindNearestTownHall(mineral->pos);
+		if (closestTH == nullptr) return sc2::Point3D(0, 0, 0); //in case there are no TownHalls left (or they're flying :)
+
+		//must give a position right in front of crystal, closest to base //base location??
+
+		float offset = 0.1f, xOffset, yOffset;
+		Point2D magicSpot;
+
+		/*float tx = closestTH->pos.x, ty = closestTH->pos.y;
+		float mx = mineral->pos.x,   my = mineral->pos.y;
+
+		if (tx > mx)	magicSpot.x = (tx - mx) * 0.1f;
+		else			magicSpot.x = mineral->pos.x - offset;
+		if (ty > my)	magicSpot.y = mineral->pos.y + offset;
+		else			magicSpot.y = mineral->pos.y - offset;*/
+
+		if (closestTH->pos.x < 60.0f) xOffset = 0.1f; else xOffset = -0.1f;
+		if (closestTH->pos.y < 60.0f) yOffset = 0.1f; else yOffset = -0.1f;
+
+		return Point2D(mineral->pos.x + xOffset, mineral->pos.y + yOffset); //magicSpot
+	}
+
+	//manage mining-workers' behaviors
+	void workersOnStep(sc2::Units workers) {
+
+		//if harvesting or moving-to-magicSpot, continue behavior. keep pairings. switch to GATHER when close-enough
+		for (auto worker : workers) {
+			sc2::Tag targetTag = workerAssignedMinerals[worker->tag];
+			const sc2::Unit* targetMineral = Observation()->GetUnit(targetTag);
+			auto workerState = workerStates[worker->tag];
+
+
+			if (targetMineral == nullptr) continue; //don't have a targetMineral, so not a mineralWorker
+
+			if (magicSpots[targetMineral->tag] == sc2::Point3D(0, 0, 0))
+			{
+				const sc2::Point2D magicSpot = calcMagicSpot(targetMineral);
+				magicSpots.insert_or_assign(targetMineral->tag, magicSpot);
+			}
+			Point2D magicSpot = magicSpots[targetMineral->tag];
+
+
+			if (workerState > WorkerState::ReturningMineral) continue; //ignore all non-miner tasks
+
+			if (IsCarryingMinerals(*worker)) { //function wants a reference, so derefence the pointer
+				workerState = WorkerState::ReturningMineral;
+			}
+
+			if (IsCarryingVespene(*worker)) { //function wants a reference, so derefence the pointer
+				workerState = WorkerState::ReturningGas;
+			}
+
+
+			if (workerState == MovingToMineral) { //on the way to the crystal
+
+				float gatherDist = (float)1.7;
+
+				if (Distance2D(worker->pos, targetMineral->pos) < gatherDist //if close enough to magicSpot, gather from mineral
+					|| Distance2D(worker->pos, magicSpot) < gatherDist) //if close enough to a mineral, start gathering from it //kind of redundant, but matters if worker approaches from behind or side
+				{
+					workerStates.insert_or_assign(worker->tag, WorkerState::GatheringMineral);
+					Actions()->UnitCommand(worker, ABILITY_ID::SMART, targetMineral);
+					continue;
+				}
+
+				Actions()->UnitCommand(worker, ABILITY_ID::MOVE, magicSpot); //keep clicking!
+				continue;
+			}
+
+			if (workerState == GatheringMineral) //return-min, start-gather, or stay-on-target
+			{
+				if (IsCarryingMinerals(*worker)) //we got what we came for, head back
+				{
+					workerStates.insert_or_assign(worker->tag, WorkerState::ReturningMineral);
+					Actions()->UnitCommand(worker, sc2::ABILITY_ID::HARVEST_RETURN);
+					continue;
+				}
+
+				if (worker->orders.empty()) //no minerals, why not gathering from target?? //this shouldn't happen, as GatheringMineral should 
+				{
+					Actions()->UnitCommand(worker, ABILITY_ID::SMART, targetMineral);
+					continue;
+				}
+
+				if (worker->orders[0].ability_id == sc2::ABILITY_ID::HARVEST_GATHER) //keep worker unit at its mineral field
+				{
+					if (worker->orders[0].target_unit_tag != targetMineral->tag) //stay on assigned field
+					{
+						Actions()->UnitCommand(worker, ABILITY_ID::SMART, targetMineral);
+					}
+
+					if (Distance2D(worker->pos, targetMineral->pos) > 3.0f) //why are we too far away? switch to sprinting
+					{
+						workerStates.insert_or_assign(worker->tag, WorkerState::MovingToMineral);
+						Actions()->UnitCommand(worker, ABILITY_ID::MOVE, magicSpot);
+					}
+				}
+			}
+
+			if (workerState == ReturningMineral)
+			{
+				if (IsCarryingMinerals(*worker) == false)
+				{ //no minerals, go back to magicSpot/mineral
+					workerStates.insert_or_assign(worker->tag, WorkerState::MovingToMineral);
+					Actions()->UnitCommand(worker, ABILITY_ID::MOVE, magicSpot);
+					continue;
+				}
+				if (worker->orders.empty() || worker->orders.size() > 0
+					&& worker->orders[0].ability_id != sc2::ABILITY_ID::HARVEST_RETURN) //have minerals but are doing something else other than returning them??
+				{
+					Actions()->UnitCommand(worker, sc2::ABILITY_ID::HARVEST_RETURN);
+				}
+			}
+		}
+	}
+
 
 	virtual void OnStep() final {
 
 		frame++;
+
+		workersOnStep(probes);
+
+			////////////////////////////////////////
+			///////////////////////////////////////
+
+			//if (probe->orders.size() == 0) { //must have just dropped off cargo at TownHall -- could be a former mineralWorker now doing something else though, a little dangerous to grab this unit
+			//	Actions()->UnitCommand(probe, ABILITY_ID::MOVE, magicSpots[targetMineral->tag]);
+			//}
+			/*else //(probe->orders.size() > 0)
+			{
+				//make sure targetMineral and magicSpot is valid
+				if (targetMineral != nullptr && magicSpots[targetMineral->tag] == sc2::Point3D(0, 0, 0)) {
+					const sc2::Point2D magicSpot = calcMagicSpot(targetMineral);
+					magicSpots.insert_or_assign(targetMineral->tag, magicSpot);
+				}
+				Point2D magicSpot = magicSpots[targetMineral->tag];
+
+				if (probe->orders[0].ability_id == sc2::ABILITY_ID::HARVEST_GATHER) //either just returned_cargo or have arrived at mineral //this may leave the random_delay after delivering cargo though
+				{
+					if (probe->orders[0].target_unit_tag != targetTag) //STAY ON TARGET, RED 5! //keep worker unit on its assigned mineral field
+					{
+						Actions()->UnitCommand(probe, ABILITY_ID::SMART, targetMineral); //retarget assigned mineral //won't leave assigned
+						continue;
+					}
+					if (Distance2D(probe->pos, magicSpot) > 2.0) //Too Far? Sprint!
+					{
+						Actions()->UnitCommand(probe, ABILITY_ID::MOVE, magicSpot); //retarget assigned mineral //won't leave assigned
+						continue;
+					}
+				}
+				else if (probe->orders[0].ability_id == sc2::ABILITY_ID::MOVE //if moving to magicSpot, switch or keep right-clicking!
+					&& magicSpot == probe->orders[0].target_pos)
+				{
+					if (Distance2D(probe->pos, magicSpot) > 2.0) //too far to gather yet?
+					{
+						Actions()->UnitCommand(probe, ABILITY_ID::MOVE, magicSpot); //keep sprinting!
+					}
+					else {
+						Actions()->UnitCommand(probe, ABILITY_ID::SMART, targetMineral); //retarget assigned mineral //won't leave assigned
+					}
+				}
+			}
+
+		}*/
+
 #ifdef DEBUG
 		{
 			
@@ -668,7 +959,10 @@ public:
 		probes = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_PROBE));
 
 		CheckIfStructuresCompleted();
+		//babysitMineralWorkersEachFrame(knownWorkers);
 
+
+		//check if the proxy-builder-worker is evading enemies
 		bool evading = false;
 		if (bob != nullptr && frame%6==0) {
 			if (bob->orders.empty() || (bob->orders.begin()->ability_id == ABILITY_ID::PATROL || bob->orders.begin()->ability_id == ABILITY_ID::MOVE || bob->orders.begin()->ability_id == ABILITY_ID::HARVEST_GATHER)) {
@@ -676,6 +970,7 @@ public:
 			}
 		}
 
+		//check if the enemy_base is farther away than the proxy at natural??
 		if (proxy != target) {
 			if (FindEnemiesInRange(target, 18).empty() && baseRazed) {
 				target = proxy;
@@ -711,9 +1006,6 @@ public:
 		//sc2::SleepFor(44);
 
 
-
-
-
 		minerals = Observation()->GetMinerals();
 		gas = Observation()->GetVespene();
 		supplyleft = Observation()->GetFoodCap() - Observation()->GetFoodUsed();
@@ -740,10 +1032,12 @@ public:
 				}
 			}
 		}
+
+
 		Units pylons = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_PYLON));
 		if (minerals >= 100 && Observation()->GetFoodCap() == 15 && pylons.empty() && nexus != nullptr) {
 			const Unit* min = FindNearestMineralPatch(nexus->pos);
-			auto ptarg = nexus->pos + (nexus->pos - min->pos);
+			auto ptarg = nexus->pos + (nexus->pos - min->pos); //on other side of TownHall from the mineral line
 			auto probes = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_PROBE));
 			int i = 0;
 			for (auto p : probes) {
@@ -751,6 +1045,8 @@ public:
 					continue;
 				if (p != bob) {
 					Actions()->UnitCommand(p, ABILITY_ID::BUILD_PYLON, ptarg);
+					workerStates.insert_or_assign(p->tag, WorkerState::MovingToBuild);
+					//Actions()->UnitCommand(p, ABILITY_ID::BUILD_PYLON, ptarg); //get back to work afterwards!
 					break;
 				}
 			}
@@ -763,7 +1059,7 @@ public:
 			TryBuildUnits();
 		}
 		auto estimated = estimateEnemyStrength();
-		if (Observation()->GetArmyCount() >= criticalZeal || Observation()->GetFoodWorkers() < 5) {
+		if (Observation()->GetArmyCount() >= (criticalZeal + (frame / 500) - 1)  || Observation()->GetFoodWorkers() < 5) {
 			const GameInfo& game_info = Observation()->GetGameInfo();			
 			
 			for (const auto & unit : Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_ZEALOT))) {
@@ -849,21 +1145,30 @@ public:
 					Actions()->UnitCommand(bob, ABILITY_ID::HARVEST_RETURN);
 				}
 			}
+			
+
+			////SHOULD WE BUILD GAS RESOURCE STRUCTURES???
 			auto ass = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_ASSIMILATOR));
-			if (Observation()->GetArmyCount() >= maxZeal && minerals >= 75 && ass.size() < 2 && nexus != nullptr && ( nexus->ideal_harvesters - nexus->assigned_harvesters < 3 || minerals >= 500)) {
+			
+			int num_until_saturation = nexus->ideal_harvesters - (probes.size() - 2); //assume bob and scout are active
+
+			if (Observation()->GetArmyCount() >= maxZeal && minerals >= 75 && ass.size() < 2 && nexus != nullptr && num_until_saturation < 3 || minerals >= 500) {
 				auto g = FindNearestVespeneGeyser(nexus->pos,ass);
 				if (!probes.empty() && g != nullptr) {
 					auto p = chooseClosest(g, probes);
 					Actions()->UnitCommand(p, ABILITY_ID::BUILD_ASSIMILATOR, g);
 					Actions()->UnitCommand(p, ABILITY_ID::HARVEST_GATHER, min, true);
+					workerStates.insert_or_assign(p->tag, WorkerState::GatheringGas);
 					minerals -= 75;
 				}
 			}
+
 			for (const auto & a : ass) {
 				if (a->build_progress < 1.0f) {
 					continue;
 				}
 				if (a->assigned_harvesters < 3) {
+					//remove any probes from 'available pool' that are returning minerals or gas or attacking
 					probes.erase(
 						remove_if(probes.begin(), probes.end(), [a](const Unit * u) { return IsCarryingVespene(*u) || IsCarryingMinerals(*u) || u->engaged_target_tag == a->tag; })
 						, probes.end());
@@ -871,6 +1176,7 @@ public:
 					if (!probes.empty()) {
 						auto p = chooseClosest(a, probes);
 						Actions()->UnitCommand(p, ABILITY_ID::HARVEST_GATHER, a);
+						workerStates.insert_or_assign(p->tag, WorkerState::GatheringGas);
 					}
 				}
 				else if (a->assigned_harvesters > 3) {
@@ -880,6 +1186,7 @@ public:
 					if (!probes.empty()) {
 						auto p = chooseClosest(min, probes);
 						Actions()->UnitCommand(p, ABILITY_ID::HARVEST_GATHER, min);
+						workerStates.insert_or_assign(p->tag, WorkerState::MovingToMineral);
 					}
 				}
 			}
@@ -964,123 +1271,6 @@ public:
 
 	}
 
-	std::vector<int> allocateTargets(const Units & probes, const Units & mins, int (*toAlloc) (const Unit *), bool keepCurrent=false) {
-		std::unordered_map<Tag, int> targetIndexes;
-		for (int i = 0, e = mins.size(); i < e; i++) {
-			targetIndexes.insert_or_assign(mins[i]->tag, i);
-		}
-		std::unordered_map<Tag, int> unitIndexes;
-		for (int i = 0, e = probes.size(); i < e; i++) {
-			targetIndexes.insert_or_assign(probes[i]->tag, i);
-		}
-		std::vector<int> targets;
-		targets.resize(probes.size(), -1);
-
-		std::vector<std::vector<int>> attackers;
-		attackers.resize(mins.size());
-
-		//std::remove_if(mins.begin(), mins.end(), [npos](const Unit * u) { return  Distance2D(u->pos, npos) > 6.0f;  });
-		std::vector<int> freeAgents;
-		std::vector<int> freeMins;
-
-		if (keepCurrent) {
-			int i = 0;
-			for (const auto & u : probes) {
-				if (!u->orders.empty()) {
-					const auto & o = u->orders.front();
-					if (o.target_unit_tag != 0) {
-						auto pu = targetIndexes.find(o.target_unit_tag);
-						if (pu == targetIndexes.end()) {
-							targets[i] = -1;
-						}
-						else {
-							int ind = pu->second;
-							targets[i] = ind;
-							attackers[ind].push_back(i);
-						}
-					}
-				}
-				i++;
-			}
-			for (int i = 0, e = mins.size(); i < e; i++) {
-				auto sz = attackers[i].size();
-				int goodValue = toAlloc(mins[i]);
-				if (sz > goodValue) {
-					auto start = mins[i]->pos;
-					std::sort(attackers[i].begin(), attackers[i].end(), [start, probes](int a, int b) { return DistanceSquared2D(start, probes[a]->pos) < DistanceSquared2D(start, probes[b]->pos); });
-
-					for (int j = goodValue, e = attackers[i].size(); j < e; j++) {
-						freeAgents.push_back(attackers[i][j]);
-						targets[attackers[i][j]] = -1;
-					}
-					attackers[i].resize(goodValue);
-
-				}
-				else if (sz < goodValue) {
-					freeMins.push_back(i);
-				}
-			}
-		}
-		else {
-			for (int i = 0, e = probes.size(); i < e; i++) {
-				freeAgents.push_back(i);
-			}
-			for (int i = 0, e = mins.size(); i < e; i++) {
-				freeMins.push_back(i);
-			}
-		}
-
-		
-		
-
-		if (!freeAgents.empty()) {
-			Point2D cogp = probes[freeAgents.front()]->pos;
-			int div = 1;
-			for (auto it = ++freeAgents.begin(); it != freeAgents.end(); ++it) {
-				cogp += probes[*it]->pos;
-				div++;
-			}
-			cogp /= div;
-
-			std::sort(freeAgents.begin(), freeAgents.end(), [cogp, probes](int a, int b) { return DistanceSquared2D(cogp, probes[a]->pos) < DistanceSquared2D(cogp, probes[b]->pos); });
-		}
-		while (!freeMins.empty() && !freeAgents.empty()) {
-			int choice = freeAgents.back();
-			freeAgents.pop_back();
-			auto start = probes[choice]->pos;
-			std::sort(freeMins.begin(), freeMins.end(), [start, mins](int a, int b) { return DistanceSquared2D(start, mins[a]->pos) > DistanceSquared2D(start, mins[b]->pos); });
-
-			int mineral = freeMins.back();
-			freeMins.pop_back();
-
-			
-			attackers[mineral].push_back(choice);
-			targets[choice] = mineral;
-			if (attackers[mineral].size() < toAlloc(mins[mineral])) {
-				freeMins.insert(freeMins.begin(), mineral);
-			}
-
-		}
-
-		return targets;
-
-	}
-
-	void TrySpreadProbes() {
-		auto npos = nexus->pos;
-		
-		Units mins = Observation()->GetUnits(Unit::Alliance::Neutral, [npos](const Unit & u) { return  IsMineral(u.unit_type) &&   Distance2D(u.pos, npos) < 15.0f ; });
-		Units probes = Observation()->GetUnits(Unit::Alliance::Self, [npos](const Unit & u) { return  u.unit_type == UNIT_TYPEID::PROTOSS_PROBE && Distance2D(u.pos, npos) < 15.0f ; });
-		
-		std::vector<int> targets = allocateTargets(probes, mins, [](const Unit *u) { return  2; });
-
-		for (int att = 0, e = targets.size(); att < e; att++) {
-			if (targets[att] != -1) {
-				Actions()->UnitCommand(probes[att], ABILITY_ID::SMART, mins[targets[att]]);
-			}
-		}
-
-	}
 
 	float getRange(const Unit *z) {
 		auto arms = Observation()->GetUnitTypeData().at(static_cast<uint32_t>(z->unit_type)).weapons;
@@ -1150,6 +1340,7 @@ public:
 			
 			if (proxy != target) {
 				Actions()->UnitCommand(unit, ABILITY_ID::SMART, FindNearestMineralPatch(nexus->pos),false);
+				workerStates.insert_or_assign(unit->tag, WorkerState::MovingToMineral);
 				scout = nullptr;
 			}
 			else {
@@ -1165,6 +1356,7 @@ public:
 				if (s == Observation()->GetGameInfo().enemy_start_locations.size() - 1) {	
 					target = Observation()->GetGameInfo().enemy_start_locations[s];
 					Actions()->UnitCommand(unit, ABILITY_ID::SMART, FindNearestMineralPatch(nexus->pos), false);
+					workerStates.insert_or_assign(unit->tag, WorkerState::MovingToMineral);
 					scout = nullptr;
 				}
 				else {
@@ -1241,6 +1433,7 @@ public:
 					break;
 				}
 				Actions()->UnitCommand(unit, ABILITY_ID::SMART, mineral_target);
+				workerStates.insert_or_assign(unit->tag, WorkerState::MovingToMineral);
 			}
 			break;
 		}
@@ -1274,7 +1467,7 @@ private:
 
 	void TryBuildUnits() {
 		if (nexus != nullptr && nexus->orders.empty() && supplyleft >= 1 && minerals >= 50) {
-			if (nexus->assigned_harvesters < nexus->ideal_harvesters) {
+			if (probes.size() < nexus->ideal_harvesters) { //nexus->assigned_harvesters < nexus->ideal_harvesters) {
 				Actions()->UnitCommand(nexus, ABILITY_ID::TRAIN_PROBE);
 				minerals -= 50;
 				supplyleft -= 1;
@@ -1405,16 +1598,12 @@ private:
 			if (observation->GetFoodUsed() >= 20 && supplyleft > 6)
 				return false;
 		}
-		
-		
 
-
-
-		// Try and build a depot. Find a random SCV and give it the order.
+		// Try and build a depot. Find a random worker and give it the order.
 		const Unit* unit_to_build = bob;
-		if (bob == nullptr) {
-			return false;
-		}
+		if (bob == nullptr) { return false; }
+
+		//check if proxy-builder is on its way to place a pylon
 		for (const auto& order : bob->orders) {
 			if (order.ability_id == ABILITY_ID::BUILD_PYLON) {
 				return false;
@@ -1427,9 +1616,9 @@ private:
 			minerals -= 100;
 			Actions()->UnitCommand(unit_to_build,
 				ABILITY_ID::BUILD_PYLON,
-				Point2D(unit_to_build->pos.x + rx * 5.0f, unit_to_build->pos.y + ry * 5.0f));
+				Point2D(unit_to_build->pos.x + rx * 4.0f, unit_to_build->pos.y + ry * 4.0f));
 		} else {
-			Units gws = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_GATEWAY));
+			Units gws = Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_GATEWAY)); //list of my gateways
 			if (gws.size() != 0 || needSupport) {
 				for (auto & gw : gws) {
 					if (!gw->is_powered && (! evading && Distance2D(gw->pos,bob->pos) < 20.0f) || (evading && Distance2D(gw->pos, bob->pos) < 8.0f)) {
@@ -1545,7 +1734,7 @@ private:
 		return true;
 	}
 
-	const int criticalZeal = 7;
+	const int criticalZeal = 8;
 	const int maxZeal = 18;
 
 	bool TryBuildBarracks(bool evading = false) {
@@ -1640,6 +1829,7 @@ private:
 		return true;
 	}
 
+	//build photon cannons for defense or ?attack
 	void dealWithFlying() {
 		if (flying != nullptr && bob != nullptr && (minerals >= 600 || flystate ==2)) {
 			float pylon = 0;
@@ -1697,6 +1887,7 @@ private:
 				flying = u.second;
 				dealWithFlying();
 				int freemin = minerals;
+				//cancel a gateway unit (Assumes a zealot) if don't have at least 400 minerals free (for forge and 3-4 cannons?)
 				for (const Unit * gw : Observation()->GetUnits(Unit::Alliance::Self, IsUnit(UNIT_TYPEID::PROTOSS_GATEWAY))) {
 					if (freemin < 400 && ! gw->orders.empty()) {
 						freemin += 100;

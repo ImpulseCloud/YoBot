@@ -28,13 +28,10 @@ int main(int argc, char* argv[])
 	});
 	// Start the game.
 	coordinator.LaunchStarcraft();
-	//auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\AcidPlantLE.SC2Map"; // "AcidPlant LE";  //"Interloper LE""16-Bit LE"
-	// auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\Redshift.SC2Map";
-	 auto map = "F:\\StarCraft II\\Maps\\DarknessSanctuary.SC2Map";
-	//auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\16BitLE.SC2Map";
-	//auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\InterloperLE.SC2Map";
-	// auto map = "G:\\Program Files (x86)\\StarCraft II\\Maps\\LostAndFoundLE.SC2Map";
-	//coordinator.StartGame("C:/Program Files (x86)/StarCraft II/Maps/InterloperLE.SC2Map");
+	//"AcidPlantLE.SC2Map"//"Interloper LE" "16-Bit LE"
+	//Redshift.SC2Map"; //DarknessSanctuary.SC2Map"; //16BitLE.SC2Map";
+	auto map = "F:\\StarCraft II\\Maps\\CeruleanFallLE.SC2Map"; //LostAndFoundLE.SC2Map"; //InterloperLE.SC2Map");
+
 	//coordinator.StartGame();
 	// coordinator.StartGame("16-Bit LE");
 	if (coordinator.StartGame(map)) {

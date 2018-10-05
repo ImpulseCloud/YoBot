@@ -30,6 +30,7 @@ public:
 	bool hasPockets() const;
 	// looking for a base ?
 	const sc2::Point3D & FindNearestBase(const sc2::Point3D& start) const;
+	const sc2::Point3D & FindFarthestBase(const sc2::Point3D& start) const;
 	// call this at game start to build up the info
 	void init(const sc2::ObservationInterface * initial, sc2::QueryInterface * query, sc2::DebugInterface * debug=nullptr);
 	// call this to see what the topology thinks in debug mode
