@@ -182,6 +182,7 @@ const sc2::Point3D & MapTopology::getPosition(Player p, BaseType b) const {
 		else {
 			return expansions[naturalBases[id]];
 		}
+	default: return (Point3D(0, 0, 0));
 	}
 }
 
@@ -224,7 +225,7 @@ void MapTopology::debugMap(DebugInterface * debug) {
 		debug->DebugTextOut(text, sc2::Point3D(e.x, e.y, e.z + 2), Colors::Green);
 	}
 
-	for (int startloc = 0, max=mainBases.size(); startloc < max; startloc++) {
+	for (int startloc = 0, max=(int)mainBases.size(); startloc < max; startloc++) {
 		debug->DebugTextOut("main" + std::to_string(startloc), expansions[mainBases[startloc]] + Point3D(0, 2, .5), Colors::Green);
 		debug->DebugTextOut("nat" + std::to_string(startloc), expansions[naturalBases[startloc]] + Point3D(0, 2, .5), Colors::Green);
 		if (pocketBases[startloc] != -1) debug->DebugTextOut("pocket" + std::to_string(startloc), expansions[pocketBases[startloc]] + Point3D(0, 2, .5), Colors::Green);

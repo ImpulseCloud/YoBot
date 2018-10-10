@@ -28,9 +28,10 @@ int main(int argc, char* argv[])
 	});
 	// Start the game.
 	coordinator.LaunchStarcraft();
-	//"AcidPlantLE.SC2Map"//"Interloper LE" "16-Bit LE"
-	//Redshift.SC2Map"; //DarknessSanctuary.SC2Map"; //16BitLE.SC2Map";
-	auto map = "F:\\StarCraft II\\Maps\\CeruleanFallLE.SC2Map"; //LostAndFoundLE.SC2Map"; //InterloperLE.SC2Map");
+	//"AcidPlantLE Interloper LE" 16BitLE
+	//Redshift DarknessSanctuary 16BitLE.SC2Map";  InterloperLE 
+	//Season6Ladder: 16BitLE AcidPlantLE CatalystLE  DreamCatcherLE LostAndFoundLE FractureLE  BlueShiftLE CeruleanFallLE //notUsed:MechDepotLD RedshiftLE //4player bad: DarknessSanctuary
+	auto map = "F:\\StarCraft II\\Maps\\CeruleanFallLE.SC2Map";
 
 	//coordinator.StartGame();
 	// coordinator.StartGame("16-Bit LE");
